@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Radius Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="panel">
+      <header>
+        <p class="eyebrow">PYTHON + OPENSTREETMAP</p>
+        <h1>Radius Map</h1>
+        <p class="subtitle">Find the closest restaurants, cafés, libraries, and coworking spaces.</p>
+      </header>
+
+      <form id="searchForm">
+        <label for="address">Starting address</label>
+        <input id="address" name="address" type="text" placeholder="e.g. 100 Queen St W, Toronto" required>
+
+        <div class="form-row">
+          <div>
+            <label for="radius">Radius</label>
+            <input id="radius" name="radius" type="number" min="0.1" step="0.1" value="2" required>
+          </div>
+          <div>
+            <label for="unit">Unit</label>
+            <select id="unit" name="unit">
+              <option value="km">Kilometres</option>
+              <option value="m">Metres</option>
+              <option value="minutes">Minutes</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="travelModeGroup" hidden>
+          <label for="travelMode">Travel mode estimate</label>
+          <select id="travelMode" name="travelMode">
+            <option value="walk">Walking</option>
+            <option value="bike">Cycling</option>
+            <option value="drive">Driving</option>
+          </select>
+          <small>Minute searches use an estimated speed, not live road routing.</small>
+        </div>
+
+        <button type="submit" id="searchButton">Search nearby</button>
+      </form>
+
+      <div id="status" class="status" aria-live="polite"></div>
+      <section id="results" class="results"></section>
+    </aside>
+    <section id="map" aria-label="Interactive map"></section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const form = document.getElementById('searchForm');
+    const unit = document.getElementById('unit');
+    const travelModeGroup = document.getElementById('travelModeGroup');
+    const statusBox = document.getElementById('status');
+    const resultsBox = document.getElementById('results');
+    const button = document.getElementById('searchButton');
+
+    const map = L.map('map').setView([43.6532, -79.3832], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let resultLayer = L.layerGroup().addTo(map);
+    let radiusCircle = null;
+
+    unit.addEventListener('change', () => {
+      travelModeGroup.hidden = unit.value !== 'minutes';
+    });
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>'"]/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      })[character]);
+    }
+
+    function formatDistance(metres) {
+      return metres < 1000 ? `${Math.round(metres)} m` : `${(metres / 1000).toFixed(2)} km`;
+    }
+
+    function markerIcon(category) {
+      const emoji = category === 'Restaurant / café' ? '🍽️' : category === 'Library' ? '📚' : '💻';
+      return L.divIcon({
+        className: 'emoji-marker',
+        html: `<span>${emoji}</span>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+      });
+    }
+
+    function renderResults(data) {
+      resultLayer.clearLayers();
+      if (radiusCircle) map.removeLayer(radiusCircle);
+
+      const origin = [data.origin.latitude, data.origin.longitude];
+      L.marker(origin).addTo(resultLayer).bindPopup(`<strong>Start</strong><br>${escapeHtml(data.origin.name)}`);
+      radiusCircle = L.circle(origin, { radius: data.radius_m, weight: 2, fillOpacity: 0.08 }).addTo(map);
+
+      data.places.forEach((place, index) => {
+        const marker = L.marker([place.latitude, place.longitude], { icon: markerIcon(place.category) })
+          .addTo(resultLayer)
+          .bindPopup(`<strong>${escapeHtml(place.name)}</strong><br>${escapeHtml(place.category)}<br>${formatDistance(place.distance_m)}`);
+        marker.on('click', () => {
+          document.getElementById(`place-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+      });
+
+      map.fitBounds(radiusCircle.getBounds(), { padding: [25, 25] });
+
+      if (!data.places.length) {
+        resultsBox.innerHTML = '<p class="empty">No matching places were found in this radius.</p>';
+        return;
+      }
+
+      resultsBox.innerHTML = `
+        <div class="results-heading"><strong>${data.places.length} places</strong><span>Closest first</span></div>
+        ${data.places.map((place, index) => `
+          <article class="place-card" id="place-${index}" data-lat="${place.latitude}" data-lon="${place.longitude}">
+            <div class="rank">${index + 1}</div>
+            <div>
+              <h2>${escapeHtml(place.name)}</h2>
+              <p>${escapeHtml(place.category)} · ${formatDistance(place.distance_m)}</p>
+              ${place.address ? `<small>${escapeHtml(place.address)}</small>` : ''}
+            </div>
+          </article>
+        `).join('')}`;
+
+      document.querySelectorAll('.place-card').forEach(card => {
+        card.addEventListener('click', () => {
+          map.setView([Number(card.dataset.lat), Number(card.dataset.lon)], 17);
+        });
+      });
+    }
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      statusBox.className = 'status loading';
+      statusBox.textContent = 'Searching map data…';
+      resultsBox.innerHTML = '';
+      button.disabled = true;
+
+      try {
+        const response = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            address: document.getElementById('address').value,
+            radius: document.getElementById('radius').value,
+            unit: unit.value,
+            travelMode: document.getElementById('travelMode').value
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Search failed.');
+        statusBox.className = 'status success';
+        statusBox.textContent = `Searched around ${data.origin.name}`;
+        renderResults(data);
+      } catch (error) {
+        statusBox.className = 'status error';
+        statusBox.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
