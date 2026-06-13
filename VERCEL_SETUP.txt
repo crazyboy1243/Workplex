@@ -1,0 +1,11 @@
+Vercel settings for this repository:
+
+Framework Preset: Other
+Root Directory: leave blank (repository root)
+Build Command: leave blank
+Output Directory: leave blank
+Install Command: leave blank
+
+Do not add vercel.json.
+After changing settings, create a new deployment without the old build cache.
+Test /api/health first, then test /.
