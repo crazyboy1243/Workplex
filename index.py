@@ -208,6 +208,34 @@ HTML = """<!doctype html>
     .panel-scroll::-webkit-scrollbar { width:5px; }
     .panel-scroll::-webkit-scrollbar-thumb { background:var(--border); border-radius:99px; }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:0s!important; transition-duration:0s!important; } }
+
+    /* job filter chips — 3-col for wider options */
+    .chips-3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:7px; margin-top:5px; }
+    .filter-section { margin-top:16px; }
+    .filter-hint { font-size:.73rem; color:var(--muted); margin-top:4px; }
+
+    /* address row with location button */
+    .address-row { display:flex; gap:7px; align-items:flex-end; }
+    .address-row input { flex:1; }
+    #locBtn {
+      flex-shrink:0; height:42px; width:42px; border:1.5px solid var(--border); border-radius:10px;
+      background:var(--surface); cursor:pointer; font-size:1.1rem;
+      display:grid; place-items:center; transition:border-color .15s,background .15s;
+      -webkit-appearance:none;
+    }
+    #locBtn:hover { border-color:var(--indigo); background:var(--indigo-l); }
+    #locBtn:disabled { opacity:.5; cursor:wait; }
+    #locBtn.locating { animation:pulse 1s infinite; }
+
+    /* source links on cards */
+    .source-links { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+    .source-link {
+      font-size:.72rem; font-weight:600; color:var(--indigo);
+      border:1.5px solid var(--indigo-m); border-radius:6px; padding:3px 8px;
+      text-decoration:none; background:var(--indigo-l);
+      transition:background .12s,border-color .12s; white-space:nowrap;
+    }
+    .source-link:hover { background:#e0e7ff; border-color:var(--indigo); }
   </style>
 </head>
 <body>
@@ -225,8 +253,11 @@ HTML = """<!doctype html>
 
         <form id="searchForm">
           <label class="field-label" for="address">Starting address</label>
-          <input id="address" name="address" type="text"
-                 placeholder="e.g. 100 Queen St W, Toronto" required autocomplete="street-address">
+          <div class="address-row">
+            <input id="address" name="address" type="text"
+                   placeholder="e.g. 100 Queen St W, Toronto" required autocomplete="street-address">
+            <button type="button" id="locBtn" title="Use current location" aria-label="Use current location">📍</button>
+          </div>
 
           <div class="row2">
             <div>
@@ -279,6 +310,52 @@ HTML = """<!doctype html>
             <span class="toggle-pill"></span>
           </label>
 
+          <!-- ── Job Filters ─────────────────────────── -->
+          <div class="filter-section">
+            <label class="field-label">Pay Grade <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input id="payGrade" name="payGrade" type="number" min="1" max="30" placeholder="e.g. 8" inputmode="numeric">
+          </div>
+
+          <div class="filter-section">
+            <label class="field-label">Shift Type <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <div class="chips" id="shiftTypeFilters">
+              <label class="chip-label"><input type="checkbox" value="full-time">⏰ Full-Time</label>
+              <label class="chip-label"><input type="checkbox" value="part-time">🕐 Part-Time</label>
+              <label class="chip-label"><input type="checkbox" value="morning">🌅 Morning</label>
+              <label class="chip-label"><input type="checkbox" value="evening">🌆 Evening</label>
+              <label class="chip-label"><input type="checkbox" value="night">🌙 Night</label>
+              <label class="chip-label"><input type="checkbox" value="weekends">📅 Weekends</label>
+            </div>
+            <p class="filter-hint">Unselected = any shift</p>
+          </div>
+
+          <div class="filter-section">
+            <label class="field-label">Job Type <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <div class="chips" id="jobTypeFilters">
+              <label class="chip-label"><input type="checkbox" value="permanent">🏢 Permanent</label>
+              <label class="chip-label"><input type="checkbox" value="contract">📋 Contract</label>
+              <label class="chip-label"><input type="checkbox" value="seasonal">🍂 Seasonal</label>
+              <label class="chip-label"><input type="checkbox" value="casual">🎯 Casual</label>
+            </div>
+            <p class="filter-hint">Unselected = any type</p>
+          </div>
+
+          <div class="filter-section">
+            <label class="field-label">Job Categories <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <div class="chips chips-3" id="jobCategoryFilters">
+              <label class="chip-label"><input type="checkbox" value="education">🎓 Education</label>
+              <label class="chip-label"><input type="checkbox" value="programs">📌 Programs</label>
+              <label class="chip-label"><input type="checkbox" value="volunteer">🤝 Volunteer</label>
+              <label class="chip-label"><input type="checkbox" value="co-op">🔬 Co-op</label>
+              <label class="chip-label"><input type="checkbox" value="trades">🔧 Trades</label>
+              <label class="chip-label"><input type="checkbox" value="healthcare">🏥 Healthcare</label>
+              <label class="chip-label"><input type="checkbox" value="technology">💻 Technology</label>
+              <label class="chip-label"><input type="checkbox" value="retail">🛍️ Retail</label>
+              <label class="chip-label"><input type="checkbox" value="food-service">🍳 Food Service</label>
+            </div>
+            <p class="filter-hint">Unselected = all categories</p>
+          </div>
+
           <button type="submit" id="searchButton">Search nearby</button>
         </form>
 
@@ -328,6 +405,27 @@ HTML = """<!doctype html>
 
     unit.addEventListener('change',()=>{travelNote.hidden=unit.value!=='minutes';});
 
+    // ── Use current location ──────────────────────
+    const locBtn=document.getElementById('locBtn');
+    const addrInput=document.getElementById('address');
+    locBtn.addEventListener('click',()=>{
+      if(!navigator.geolocation){alert('Geolocation is not supported by your browser.');return;}
+      locBtn.disabled=true;locBtn.classList.add('locating');locBtn.textContent='⏳';
+      navigator.geolocation.getCurrentPosition(async pos=>{
+        const {latitude:lat,longitude:lon}=pos.coords;
+        try{
+          const r=await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`,{headers:{'User-Agent':'WorkplexHiringApp/1.0'}});
+          const d=await r.json();
+          addrInput.value=d.display_name||`${lat},${lon}`;
+        }catch{addrInput.value=`${lat.toFixed(6)},${lon.toFixed(6)}`;}
+        locBtn.disabled=false;locBtn.classList.remove('locating');locBtn.textContent='📍';
+      },err=>{
+        locBtn.disabled=false;locBtn.classList.remove('locating');locBtn.textContent='📍';
+        const msgs={1:'Location access denied.',2:'Location unavailable.',3:'Location request timed out.'};
+        alert(msgs[err.code]||'Could not get location.');
+      },{timeout:10000,enableHighAccuracy:true});
+    });
+
     function esc(v){return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]);}
     function fmtDist(m){return m<1000?`${Math.round(m)} m`:`${(m/1000).toFixed(2)} km`;}
     function markerIcon(cat,blocked){
@@ -346,11 +444,13 @@ HTML = """<!doctype html>
       });
     }
 
-    async function loadHiringStatus(place,i,address){
+    async function loadHiringStatus(place,i,address,filters){
       const badge=document.getElementById(`hiring-${i}`);
       if(!badge)return;
       try{
-        const res=await fetch('/api/hiring',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:place.name,address})});
+        const payload={name:place.name,address};
+        if(filters){if(filters.payGrade)payload.payGrade=filters.payGrade;if(filters.shiftTypes&&filters.shiftTypes.length)payload.shiftTypes=filters.shiftTypes;if(filters.jobTypes&&filters.jobTypes.length)payload.jobTypes=filters.jobTypes;if(filters.jobCategories&&filters.jobCategories.length)payload.jobCategories=filters.jobCategories;}
+        const res=await fetch('/api/hiring',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
         const d=await res.json();
         badge.className='badge';
         if(d.hiring){badge.dataset.hiring='true';badge.textContent='✅ Hiring';badge.classList.add('badge-green');if(d.url){badge.style.cursor='pointer';badge.title='View listings';badge.onclick=()=>window.open(d.url,'_blank');}}
@@ -376,31 +476,47 @@ HTML = """<!doctype html>
       const showing=data.places.filter(p=>!p.age_blocked).length;
       const blocked=data.places.length-showing;
       resultsBox.innerHTML=`<div class="results-heading"><strong>${showing} available</strong><span>${blocked>0?blocked+' age-restricted · ':''}Closest first</span></div>`+
-        data.places.map((place,i)=>`<article class="place-card${place.age_blocked?' age-blocked':''}" id="place-${i}" data-lat="${place.latitude}" data-lon="${place.longitude}">
+        data.places.map((place,i)=>{
+          const q=encodeURIComponent(place.name);
+          const loc=encodeURIComponent(place.address||data.origin.name.split(',').slice(0,2).join(','));
+          const indeedUrl=`https://ca.indeed.com/jobs?q=${q}&l=${loc}`;
+          const linkedInUrl=`https://www.linkedin.com/jobs/search/?keywords=${q}&location=${loc}`;
+          const companyUrl=`https://www.google.com/search?q=${q}+careers+jobs+site`;
+          return `<article class="place-card${place.age_blocked?' age-blocked':''}" id="place-${i}" data-lat="${place.latitude}" data-lon="${place.longitude}">
           <div class="rank">${i+1}</div>
           <div>
             <h2>${esc(place.name)}${place.age_label?`<span class="badge ${place.age_blocked?'badge-red':'badge-green'}">${esc(place.age_label)}</span>`:''}${checkHiring?`<span class="badge badge-pulse hiring-badge" id="hiring-${i}" data-hiring="">Checking\u2026</span>`:''}</h2>
             <p>${esc(place.category)} \u00b7 ${fmtDist(place.distance_m)}</p>
             ${place.address?`<small>${esc(place.address)}</small>`:''}
             ${place.age_blocked?`<small style="color:var(--red)">\u26a0\ufe0f Requires ${esc(place.age_label)}</small>`:''}
+            <div class="source-links">
+              <a class="source-link" href="${indeedUrl}" target="_blank" rel="noopener">Indeed</a>
+              <a class="source-link" href="${linkedInUrl}" target="_blank" rel="noopener">LinkedIn</a>
+              <a class="source-link" href="${companyUrl}" target="_blank" rel="noopener">Company Site</a>
+            </div>
           </div>
-        </article>`).join('');
+        </article>`;}).join('');
       document.querySelectorAll('.place-card:not(.age-blocked)').forEach(card=>{
         card.addEventListener('click',e=>{
           if(e.target.classList.contains('hiring-badge'))return;
+          if(e.target.classList.contains('source-link'))return;
           map.setView([Number(card.dataset.lat),Number(card.dataset.lon)],17);
           if(isMobile())collapsePanel();
         });
       });
       if(checkHiring){
         const cityHint=data.origin.name.split(',').slice(0,2).join(',');
-        data.places.forEach((place,i)=>{if(!place.age_blocked)loadHiringStatus(place,i,place.address||cityHint);});
+        data.places.forEach((place,i)=>{if(!place.age_blocked)loadHiringStatus(place,i,place.address||cityHint,data.filters||null);});
       }
     }
 
     document.getElementById('searchForm').addEventListener('submit',async event=>{
       event.preventDefault();
       const selectedCats=[...document.querySelectorAll('#categoryFilters input:checked')].map(c=>c.value);
+      const payGrade=document.getElementById('payGrade').value.trim()||null;
+      const shiftTypes=[...document.querySelectorAll('#shiftTypeFilters input:checked')].map(c=>c.value);
+      const jobTypes=[...document.querySelectorAll('#jobTypeFilters input:checked')].map(c=>c.value);
+      const jobCategories=[...document.querySelectorAll('#jobCategoryFilters input:checked')].map(c=>c.value);
       statusBox.className='status loading';statusBox.textContent='Searching map data\u2026';
       resultsBox.innerHTML='';button.disabled=true;
       try{
@@ -408,7 +524,11 @@ HTML = """<!doctype html>
           body:JSON.stringify({address:document.getElementById('address').value,
             age:parseInt(document.getElementById('age').value,10),
             radius:document.getElementById('radius').value,unit:unit.value,
-            travelMode:document.getElementById('travelMode').value,categories:selectedCats})});
+            travelMode:document.getElementById('travelMode').value,categories:selectedCats,
+            payGrade:payGrade?parseInt(payGrade,10):null,
+            shiftTypes:shiftTypes.length?shiftTypes:null,
+            jobTypes:jobTypes.length?jobTypes:null,
+            jobCategories:jobCategories.length?jobCategories:null})});
         const ct=response.headers.get('content-type')||'';
         if(!ct.includes('application/json'))throw new Error(`Server error (HTTP ${response.status})`);
         const data=await response.json();
@@ -613,6 +733,10 @@ def search_places():
         radius_unit = str(payload.get("unit", "km")).strip().lower()
         travel_mode = str(payload.get("travelMode", "walk")).strip().lower()
         categories = payload.get("categories")
+        pay_grade = payload.get("payGrade")
+        shift_types = payload.get("shiftTypes")  # list or None
+        job_types = payload.get("jobTypes")       # list or None
+        job_categories = payload.get("jobCategories")  # list or None
         if not isinstance(categories, list) or not categories:
             categories = list(CATEGORY_AGE_RULES.keys())
         if not address:
@@ -627,6 +751,12 @@ def search_places():
             "origin": {"latitude": lat, "longitude": lon, "name": display_name},
             "radius_m": round(radius_m),
             "places": [asdict(p) for p in places],
+            "filters": {
+                "payGrade": int(pay_grade) if pay_grade is not None else None,
+                "shiftTypes": shift_types or [],
+                "jobTypes": job_types or [],
+                "jobCategories": job_categories or [],
+            },
         })
     except (ValueError, TypeError) as e:
         return jsonify({"error": str(e)}), 400
@@ -646,15 +776,25 @@ if __name__ == "__main__":
     app.run(debug=True, host="127.0.0.1", port=int(os.environ.get("PORT", "5000")))
 
 
-def groq_search_hiring(name: str, address: str) -> tuple[bool, str]:
+def groq_search_hiring(name: str, address: str, pay_grade=None, shift_types=None, job_types=None, job_categories=None) -> tuple[bool, str]:
     """Use Groq compound-beta with web_search to check if a place is hiring.
     Returns (is_hiring, listing_url)."""
     if not GROQ_API_KEY:
         return False, ""
     try:
         client = Groq(api_key=GROQ_API_KEY)
+        filter_hints = []
+        if pay_grade:
+            filter_hints.append(f"pay grade {pay_grade}")
+        if shift_types:
+            filter_hints.append(f"shift: {', '.join(shift_types)}")
+        if job_types:
+            filter_hints.append(f"job type: {', '.join(job_types)}")
+        if job_categories:
+            filter_hints.append(f"category: {', '.join(job_categories)}")
+        filter_str = f" Prefer listings matching: {'; '.join(filter_hints)}." if filter_hints else ""
         prompt = (
-            f'Search for current job listings for "{name}" located at "{address}". '
+            f'Search for current job listings for "{name}" located at "{address}".{filter_str} '
             f'Look on Indeed, LinkedIn, Glassdoor, or their own website. '
             f'Reply in JSON only, no markdown, with keys: '
             f'"hiring" (true/false) and "url" (the best job listing URL, or empty string). '
@@ -690,11 +830,15 @@ def check_hiring():
             raise ValueError("Send JSON with name and address.")
         name = str(payload.get("name", "")).strip()
         address = str(payload.get("address", "")).strip()
+        pay_grade = payload.get("payGrade")
+        shift_types = payload.get("shiftTypes")
+        job_types = payload.get("jobTypes")
+        job_categories = payload.get("jobCategories")
         if not name:
             raise ValueError("name is required.")
         if not GROQ_API_KEY:
             return jsonify({"error": "GROQ_API_KEY not configured."}), 503
-        hiring, url = groq_search_hiring(name, address)
+        hiring, url = groq_search_hiring(name, address, pay_grade=pay_grade, shift_types=shift_types, job_types=job_types, job_categories=job_categories)
         return jsonify({"hiring": hiring, "url": url})
     except (ValueError, TypeError) as e:
         return jsonify({"error": str(e)}), 400
