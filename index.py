@@ -236,6 +236,24 @@ HTML = """<!doctype html>
       transition:background .12s,border-color .12s; white-space:nowrap;
     }
     .source-link:hover { background:#e0e7ff; border-color:var(--indigo); }
+
+    /* ── Address autocomplete ──────────────────── */
+    .addr-wrap { position:relative; flex:1; }
+    #suggestions {
+      position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:9999;
+      background:var(--surface); border:1.5px solid var(--border); border-radius:10px;
+      box-shadow:0 8px 32px rgba(15,23,42,.13); overflow:hidden; display:none;
+    }
+    .sugg-item {
+      padding:10px 13px; cursor:pointer; font-size:.85rem; line-height:1.35;
+      border-bottom:1px solid var(--border); display:flex; align-items:center; gap:9px;
+      transition:background .1s;
+    }
+    .sugg-item:last-child { border-bottom:none; }
+    .sugg-item:hover, .sugg-item.active { background:var(--indigo-l); }
+    .sugg-icon { font-size:1rem; flex-shrink:0; width:20px; text-align:center; }
+    .sugg-main { font-weight:600; color:var(--ink); }
+    .sugg-sub { font-size:.74rem; color:var(--muted); margin-top:1px; }
   </style>
 </head>
 <body>
@@ -254,25 +272,28 @@ HTML = """<!doctype html>
         <form id="searchForm">
           <label class="field-label" for="address">Starting address</label>
           <div class="address-row">
-            <input id="address" name="address" type="text"
-                   placeholder="e.g. 100 Queen St W, Toronto" required autocomplete="street-address">
+            <div class="addr-wrap">
+              <input id="address" name="address" type="text"
+                     placeholder="Country, city, street…" required autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="suggestions" aria-expanded="false">
+              <div id="suggestions" role="listbox" aria-label="Address suggestions"></div>
+            </div>
             <button type="button" id="locBtn" title="Use current location" aria-label="Use current location">📍</button>
           </div>
 
           <div class="row2">
             <div>
-              <label class="field-label" for="age">Your age</label>
-              <input id="age" name="age" type="number" min="1" max="120" placeholder="17" required inputmode="numeric">
+              <label class="field-label" for="age">Age <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
+              <input id="age" name="age" type="number" min="1" max="120" placeholder="e.g. 17" inputmode="numeric">
             </div>
             <div>
-              <label class="field-label" for="radius">Radius</label>
-              <input id="radius" name="radius" type="number" min="0.1" step="0.1" value="2" required inputmode="decimal">
+              <label class="field-label" for="radius">Radius <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
+              <input id="radius" name="radius" type="number" min="0.1" step="0.1" value="2" inputmode="decimal">
             </div>
           </div>
 
           <div class="row2">
             <div>
-              <label class="field-label" for="unit">Unit</label>
+              <label class="field-label" for="unit">Unit <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
               <select id="unit" name="unit">
                 <option value="km">Kilometres</option>
                 <option value="m">Metres</option>
@@ -280,7 +301,7 @@ HTML = """<!doctype html>
               </select>
             </div>
             <div>
-              <label class="field-label" for="travelMode">Travel</label>
+              <label class="field-label" for="travelMode">Travel <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
               <select id="travelMode" name="travelMode">
                 <option value="walk">🚶 Walk</option>
                 <option value="bike">🚲 Cycle</option>
@@ -290,14 +311,6 @@ HTML = """<!doctype html>
           </div>
           <div id="travelModeNote" hidden style="margin-top:5px">
             <small>Minutes use estimated speed, not live routing.</small>
-          </div>
-
-          <label class="field-label">Categories</label>
-          <div class="chips" id="categoryFilters">
-            <label class="chip-label"><input type="checkbox" value="Restaurant / café" checked>🍽️ Restaurants</label>
-            <label class="chip-label"><input type="checkbox" value="Library" checked>📚 Libraries</label>
-            <label class="chip-label"><input type="checkbox" value="Coworking space" checked>💻 Coworking</label>
-            <label class="chip-label"><input type="checkbox" value="Bar / pub" checked>🍺 Bars &amp; Pubs</label>
           </div>
 
           <label class="smart-row">
@@ -312,7 +325,7 @@ HTML = """<!doctype html>
 
           <!-- ── Job Filters ─────────────────────────── -->
           <div class="filter-section">
-            <label class="field-label">Pay Grade <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <label class="field-label">Pay Grade <span style="font-weight:400;color:var(--muted)">(optional, 1–30)</span></label>
             <input id="payGrade" name="payGrade" type="number" min="1" max="30" placeholder="e.g. 8" inputmode="numeric">
           </div>
 
@@ -426,6 +439,75 @@ HTML = """<!doctype html>
       },{timeout:10000,enableHighAccuracy:true});
     });
 
+    // ── Address autocomplete ──────────────────────
+    const suggBox=document.getElementById('suggestions');
+    let suggData=[],activeIdx=-1,debTimer=null;
+
+    // Map OSM types to icons and readable labels
+    function placeIcon(type,cls){
+      const icons={country:'🌍',state:'🗺️',province:'🗺️',region:'🗺️',county:'🏞️',
+        city:'🏙️',town:'🏘️',village:'🏡',hamlet:'🏡',suburb:'🏘️',neighbourhood:'🏘️',quarter:'🏘️',
+        road:'🛣️',street:'🛣️',path:'🛤️',pedestrian:'🛤️',
+        house:'🏠',building:'🏢',postcode:'📮',
+        airport:'✈️',station:'🚉',bus_stop:'🚌'};
+      return icons[type]||icons[cls]||'📌';
+    }
+    function placeType(type,cls,addresstype){
+      const labels={country:'Country',state:'State / Province',county:'County',
+        city:'City',town:'Town',village:'Village',hamlet:'Hamlet',suburb:'Suburb',
+        neighbourhood:'Neighbourhood',road:'Street',house:'Address',building:'Building',
+        postcode:'Postcode',airport:'Airport',station:'Station'};
+      return labels[type]||labels[addresstype]||labels[cls]||(type?type.replace(/_/g,' '):'Place');
+    }
+
+    function showSugg(){
+      if(!suggData.length){suggBox.style.display='none';addrInput.setAttribute('aria-expanded','false');return;}
+      suggBox.innerHTML=suggData.map((s,i)=>`
+        <div class="sugg-item${i===activeIdx?' active':''}" role="option" data-i="${i}">
+          <span class="sugg-icon">${placeIcon(s.type,s.class)}</span>
+          <div><div class="sugg-main">${esc(s.display_name.split(',')[0])}</div>
+          <div class="sugg-sub">${esc(s.display_name.split(',').slice(1,4).join(',').trim())} <span style="color:var(--indigo-d);font-weight:600">${placeType(s.type,s.class,s.addresstype)}</span></div></div>
+        </div>`).join('');
+      suggBox.style.display='block';addrInput.setAttribute('aria-expanded','true');
+      suggBox.querySelectorAll('.sugg-item').forEach(el=>{
+        el.addEventListener('mousedown',e=>{e.preventDefault();selectSugg(parseInt(el.dataset.i));});
+      });
+    }
+
+    function selectSugg(i){
+      if(i<0||i>=suggData.length)return;
+      addrInput.value=suggData[i].display_name;
+      suggBox.style.display='none';addrInput.setAttribute('aria-expanded','false');
+      suggData=[];activeIdx=-1;
+    }
+
+    async function fetchSugg(q){
+      if(q.length<2){suggData=[];showSugg();return;}
+      try{
+        // Accept all OSM feature classes; featuretype param broadens results
+        const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&limit=7&addressdetails=0&dedupe=1`;
+        const r=await fetch(url,{headers:{'Accept-Language':'en','User-Agent':'WorkplexHiringApp/1.0'}});
+        suggData=await r.json();
+        activeIdx=-1;showSugg();
+      }catch{suggData=[];showSugg();}
+    }
+
+    addrInput.addEventListener('input',()=>{
+      clearTimeout(debTimer);
+      debTimer=setTimeout(()=>fetchSugg(addrInput.value.trim()),280);
+    });
+
+    addrInput.addEventListener('keydown',e=>{
+      if(!suggData.length)return;
+      if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,suggData.length-1);showSugg();}
+      else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,-1);showSugg();}
+      else if(e.key==='Enter'&&activeIdx>=0){e.preventDefault();selectSugg(activeIdx);}
+      else if(e.key==='Escape'){suggBox.style.display='none';addrInput.setAttribute('aria-expanded','false');}
+    });
+
+    document.addEventListener('click',e=>{
+      if(!suggBox.contains(e.target)&&e.target!==addrInput){suggBox.style.display='none';addrInput.setAttribute('aria-expanded','false');}
+    });
     function esc(v){return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]);}
     function fmtDist(m){return m<1000?`${Math.round(m)} m`:`${(m/1000).toFixed(2)} km`;}
     function markerIcon(cat,blocked){
@@ -487,7 +569,7 @@ HTML = """<!doctype html>
           <div>
             <h2>${esc(place.name)}${place.age_label?`<span class="badge ${place.age_blocked?'badge-red':'badge-green'}">${esc(place.age_label)}</span>`:''}${checkHiring?`<span class="badge badge-pulse hiring-badge" id="hiring-${i}" data-hiring="">Checking\u2026</span>`:''}</h2>
             <p>${esc(place.category)} \u00b7 ${fmtDist(place.distance_m)}</p>
-            ${place.address?`<small>${esc(place.address)}</small>`:''}
+            <p style="font-size:.8rem;color:var(--muted);margin-top:2px">📍 ${esc(place.address||'Address unavailable')}</p>
             ${place.age_blocked?`<small style="color:var(--red)">\u26a0\ufe0f Requires ${esc(place.age_label)}</small>`:''}
             <div class="source-links">
               <a class="source-link" href="${indeedUrl}" target="_blank" rel="noopener">Indeed</a>
@@ -512,19 +594,20 @@ HTML = """<!doctype html>
 
     document.getElementById('searchForm').addEventListener('submit',async event=>{
       event.preventDefault();
-      const selectedCats=[...document.querySelectorAll('#categoryFilters input:checked')].map(c=>c.value);
       const payGrade=document.getElementById('payGrade').value.trim()||null;
       const shiftTypes=[...document.querySelectorAll('#shiftTypeFilters input:checked')].map(c=>c.value);
       const jobTypes=[...document.querySelectorAll('#jobTypeFilters input:checked')].map(c=>c.value);
       const jobCategories=[...document.querySelectorAll('#jobCategoryFilters input:checked')].map(c=>c.value);
+      const ageVal=document.getElementById('age').value.trim();
+      const radiusVal=document.getElementById('radius').value.trim();
       statusBox.className='status loading';statusBox.textContent='Searching map data\u2026';
       resultsBox.innerHTML='';button.disabled=true;
       try{
         const response=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({address:document.getElementById('address').value,
-            age:parseInt(document.getElementById('age').value,10),
-            radius:document.getElementById('radius').value,unit:unit.value,
-            travelMode:document.getElementById('travelMode').value,categories:selectedCats,
+            age:ageVal?parseInt(ageVal,10):null,
+            radius:radiusVal?parseFloat(radiusVal):2,unit:unit.value,
+            travelMode:document.getElementById('travelMode').value,
             payGrade:payGrade?parseInt(payGrade,10):null,
             shiftTypes:shiftTypes.length?shiftTypes:null,
             jobTypes:jobTypes.length?jobTypes:null,
@@ -728,21 +811,22 @@ def search_places():
         if not isinstance(payload, dict):
             raise ValueError("Send the request as JSON.")
         address = str(payload.get("address", "")).strip()
-        age = int(payload.get("age", 0))
-        radius_value = float(payload.get("radius", 0))
+        age_raw = payload.get("age")
+        age = int(age_raw) if age_raw is not None else 0
+        radius_value = float(payload.get("radius") or 2)
         radius_unit = str(payload.get("unit", "km")).strip().lower()
         travel_mode = str(payload.get("travelMode", "walk")).strip().lower()
         categories = payload.get("categories")
         pay_grade = payload.get("payGrade")
-        shift_types = payload.get("shiftTypes")  # list or None
-        job_types = payload.get("jobTypes")       # list or None
-        job_categories = payload.get("jobCategories")  # list or None
+        shift_types = payload.get("shiftTypes")
+        job_types = payload.get("jobTypes")
+        job_categories = payload.get("jobCategories")
         if not isinstance(categories, list) or not categories:
             categories = list(CATEGORY_AGE_RULES.keys())
         if not address:
             raise ValueError("Enter an address.")
-        if age < 1 or age > 120:
-            raise ValueError("Enter a valid age between 1 and 120.")
+        if age_raw is not None and (age < 1 or age > 120):
+            raise ValueError("Age must be between 1 and 120.")
         radius_m = radius_to_metres(radius_value, radius_unit, travel_mode)
         lat, lon, display_name = geocode(address)
         elements = query_overpass(build_overpass_query(lat, lon, radius_m))
