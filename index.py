@@ -14,6 +14,7 @@ NOMINATIM_EMAIL = os.environ.get("NOMINATIM_EMAIL", "").strip()
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 USER_AGENT = os.environ.get(
     "RADIUS_MAP_USER_AGENT",
@@ -254,7 +255,7 @@ def build_overpass_query(lat, lon, radius_m):
     for key, values in filters:
         for t in ("node", "way", "relation"):
             stmts.append(f'{t}["{key}"~"^({values})$"](around:{int(radius_m)},{lat},{lon});')
-    return "[out:json][timeout:25];(" + "".join(stmts) + ");out center tags;"
+    return "[out:json][timeout:12];(" + "".join(stmts) + ");out center tags;"
 
 
 def query_overpass(query):
@@ -262,7 +263,7 @@ def query_overpass(query):
     for endpoint in OVERPASS_URLS:
         try:
             r = requests.post(endpoint, data={"data": query},
-                              headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=35)
+                              headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=15)
             r.raise_for_status()
             data = r.json()
             elements = data.get("elements", [])
