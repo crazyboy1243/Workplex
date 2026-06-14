@@ -6,6 +6,13 @@ Build Command: leave blank
 Output Directory: leave blank
 Install Command: leave blank
 
-Do not add vercel.json.
-After changing settings, create a new deployment without the old build cache.
-Test /api/health first, then test /.
+A vercel.json is included — do NOT remove it. It routes all requests
+to api/index.py (the Flask app entry point) and serves public/style.css
+as a static file.
+
+After deploying:
+1. Test /api/health first — should return {"status":"ok","service":"radius-map"}
+2. Then test /
+
+If you see "Unexpected token" JSON errors, the API route is not routing correctly.
+Verify vercel.json is present and not excluded by .gitignore.

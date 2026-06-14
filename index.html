@@ -158,8 +158,20 @@
             travelMode: document.getElementById('travelMode').value
           })
         });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Search failed.');
+
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          throw new Error(`Server error (HTTP ${response.status}): the API returned an unexpected response. Check your deployment configuration.`);
+        }
+
+        let data;
+        try {
+          data = await response.json();
+        } catch (parseError) {
+          throw new Error(`Could not parse server response. HTTP ${response.status}. This usually means the API route is not configured correctly.`);
+        }
+
+        if (!response.ok) throw new Error(data.error || `Search failed (HTTP ${response.status}).`);
         statusBox.className = 'status success';
         statusBox.textContent = `Searched around ${data.origin.name}`;
         renderResults(data);
