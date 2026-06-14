@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import asdict, dataclass
-from typing import Iterable
+from dataclasses import asdict, dataclass, field
 
 import requests
 from flask import Flask, jsonify, request
@@ -12,12 +11,10 @@ app = Flask(__name__)
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_EMAIL = os.environ.get("NOMINATIM_EMAIL", "").strip()
-
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
-
 USER_AGENT = os.environ.get(
     "RADIUS_MAP_USER_AGENT",
     "RadiusMapStudentProject/2.0 (contact: 787005@pdsb.net)",
@@ -25,6 +22,14 @@ USER_AGENT = os.environ.get(
 
 MAX_RADIUS_M = 20_000
 MAX_RESULTS = 100
+
+# Age rules: (min_age, max_age or None, label)
+CATEGORY_AGE_RULES = {
+    "Restaurant / café": (0, None, None),
+    "Library": (0, None, None),
+    "Coworking space": (16, None, "16+"),
+    "Bar / pub": (19, None, "19+"),  # Ontario legal age
+}
 
 HTML = """<!doctype html>
 <html lang="en">
@@ -54,8 +59,14 @@ button:hover{background:#4338ca}button:disabled{opacity:.55;cursor:wait}
 .results-heading strong{color:#172033;font-size:.95rem}
 .place-card{display:grid;grid-template-columns:34px 1fr;gap:10px;border:1px solid #e5e9f0;border-radius:14px;padding:13px;margin-bottom:10px;cursor:pointer;transition:transform .15s,box-shadow .15s}
 .place-card:hover{transform:translateY(-1px);box-shadow:0 7px 18px rgba(18,35,64,.09)}
+.place-card.age-blocked{opacity:.45;border-color:#fecaca;background:#fff5f5;cursor:not-allowed}
+.place-card.age-blocked:hover{transform:none;box-shadow:none}
 .rank{width:28px;height:28px;display:grid;place-items:center;border-radius:9px;background:#eef2ff;color:#4338ca;font-weight:800}
+.place-card.age-blocked .rank{background:#fee2e2;color:#b91c1c}
 .place-card h2{font-size:.96rem;margin:0 0 4px}.place-card p{color:#526078;font-size:.82rem;margin:0 0 4px}.empty{color:#64748b}
+.age-badge{display:inline-block;font-size:.7rem;font-weight:800;padding:2px 7px;border-radius:99px;margin-left:6px;vertical-align:middle}
+.age-badge.ok{background:#dcfce7;color:#15803d}
+.age-badge.blocked{background:#fee2e2;color:#b91c1c}
 .emoji-marker span{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:white;box-shadow:0 3px 12px rgba(0,0,0,.25);font-size:18px}
 @media(max-width:780px){.app-shell{grid-template-columns:1fr;grid-template-rows:auto 55vh;height:auto}.panel{max-height:none;padding:22px}#map{height:55vh}}
   </style>
@@ -73,9 +84,15 @@ button:hover{background:#4338ca}button:disabled{opacity:.55;cursor:wait}
         <input id="address" name="address" type="text" placeholder="e.g. 100 Queen St W, Toronto" required>
         <div class="form-row">
           <div>
+            <label for="age">Your age</label>
+            <input id="age" name="age" type="number" min="1" max="120" placeholder="e.g. 17" required>
+          </div>
+          <div>
             <label for="radius">Radius</label>
             <input id="radius" name="radius" type="number" min="0.1" step="0.1" value="2" required>
           </div>
+        </div>
+        <div class="form-row">
           <div>
             <label for="unit">Unit</label>
             <select id="unit" name="unit">
@@ -84,16 +101,16 @@ button:hover{background:#4338ca}button:disabled{opacity:.55;cursor:wait}
               <option value="minutes">Minutes</option>
             </select>
           </div>
+          <div id="travelModeWrap">
+            <label for="travelMode">Travel mode</label>
+            <select id="travelMode" name="travelMode">
+              <option value="walk">Walking</option>
+              <option value="bike">Cycling</option>
+              <option value="drive">Driving</option>
+            </select>
+          </div>
         </div>
-        <div id="travelModeGroup" hidden>
-          <label for="travelMode">Travel mode estimate</label>
-          <select id="travelMode" name="travelMode">
-            <option value="walk">Walking</option>
-            <option value="bike">Cycling</option>
-            <option value="drive">Driving</option>
-          </select>
-          <small>Minute searches use an estimated speed, not live road routing.</small>
-        </div>
+        <div id="travelModeNote" hidden><small>Minute searches use estimated speed, not live routing.</small></div>
         <button type="submit" id="searchButton">Search nearby</button>
       </form>
       <div id="status" class="status" aria-live="polite"></div>
@@ -104,16 +121,20 @@ button:hover{background:#4338ca}button:disabled{opacity:.55;cursor:wait}
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const form=document.getElementById('searchForm'),unit=document.getElementById('unit'),
-      travelModeGroup=document.getElementById('travelModeGroup'),
+      travelModeNote=document.getElementById('travelModeNote'),
       statusBox=document.getElementById('status'),resultsBox=document.getElementById('results'),
       button=document.getElementById('searchButton');
     const map=L.map('map').setView([43.6532,-79.3832],12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
     let resultLayer=L.layerGroup().addTo(map),radiusCircle=null;
-    unit.addEventListener('change',()=>{travelModeGroup.hidden=unit.value!=='minutes'});
+    unit.addEventListener('change',()=>{travelModeNote.hidden=unit.value!=='minutes'});
     function escapeHtml(v){return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":"&#39;",'"':'&quot;'})[c])}
     function formatDistance(m){return m<1000?`${Math.round(m)} m`:`${(m/1000).toFixed(2)} km`}
-    function markerIcon(cat){const e=cat==='Restaurant / café'?'🍽️':cat==='Library'?'📚':'💻';return L.divIcon({className:'emoji-marker',html:`<span>${e}</span>`,iconSize:[34,34],iconAnchor:[17,17]})}
+    function markerIcon(cat,blocked){
+      const e=cat==='Restaurant / café'?'🍽️':cat==='Library'?'📚':cat==='Bar / pub'?'🍺':'💻';
+      const bg=blocked?'#fee2e2':'white';
+      return L.divIcon({className:'emoji-marker',html:`<span style="background:${bg}">${e}</span>`,iconSize:[34,34],iconAnchor:[17,17]});
+    }
     function renderResults(data){
       resultLayer.clearLayers();
       if(radiusCircle)map.removeLayer(radiusCircle);
@@ -121,19 +142,25 @@ button:hover{background:#4338ca}button:disabled{opacity:.55;cursor:wait}
       L.marker(origin).addTo(resultLayer).bindPopup(`<strong>Start</strong><br>${escapeHtml(data.origin.name)}`);
       radiusCircle=L.circle(origin,{radius:data.radius_m,weight:2,fillOpacity:0.08}).addTo(map);
       data.places.forEach((place,i)=>{
-        const marker=L.marker([place.latitude,place.longitude],{icon:markerIcon(place.category)})
-          .addTo(resultLayer).bindPopup(`<strong>${escapeHtml(place.name)}</strong><br>${escapeHtml(place.category)}<br>${formatDistance(place.distance_m)}`);
+        const marker=L.marker([place.latitude,place.longitude],{icon:markerIcon(place.category,place.age_blocked)})
+          .addTo(resultLayer)
+          .bindPopup(`<strong>${escapeHtml(place.name)}</strong><br>${escapeHtml(place.category)}<br>${formatDistance(place.distance_m)}${place.age_label?'<br><em>'+escapeHtml(place.age_label)+'</em>':''}`);
         marker.on('click',()=>{document.getElementById(`place-${i}`)?.scrollIntoView({behavior:'smooth',block:'center'})});
       });
       map.fitBounds(radiusCircle.getBounds(),{padding:[25,25]});
       if(!data.places.length){resultsBox.innerHTML='<p class="empty">No matching places were found in this radius.</p>';return}
-      resultsBox.innerHTML=`<div class="results-heading"><strong>${data.places.length} places</strong><span>Closest first</span></div>`+
-        data.places.map((place,i)=>`<article class="place-card" id="place-${i}" data-lat="${place.latitude}" data-lon="${place.longitude}">
-          <div class="rank">${i+1}</div><div><h2>${escapeHtml(place.name)}</h2>
+      const showing=data.places.filter(p=>!p.age_blocked).length;
+      const blocked=data.places.length-showing;
+      resultsBox.innerHTML=`<div class="results-heading"><strong>${showing} available</strong><span>${blocked>0?`${blocked} age-restricted · `:''}}Closest first</span></div>`+
+        data.places.map((place,i)=>`<article class="place-card${place.age_blocked?' age-blocked':''}" id="place-${i}" data-lat="${place.latitude}" data-lon="${place.longitude}">
+          <div class="rank">${i+1}</div><div>
+          <h2>${escapeHtml(place.name)}${place.age_label?`<span class="age-badge ${place.age_blocked?'blocked':'ok'}">${escapeHtml(place.age_label)}</span>`:''}</h2>
           <p>${escapeHtml(place.category)} · ${formatDistance(place.distance_m)}</p>
-          ${place.address?`<small>${escapeHtml(place.address)}</small>`:''}</div></article>`).join('');
-      document.querySelectorAll('.place-card').forEach(card=>{
-        card.addEventListener('click',()=>{map.setView([Number(card.dataset.lat),Number(card.dataset.lon)],17)})
+          ${place.address?`<small>${escapeHtml(place.address)}</small>`:''}
+          ${place.age_blocked?`<small style="color:#b91c1c">⚠️ Age restriction — requires ${escapeHtml(place.age_label)}</small>`:''}
+          </div></article>`).join('');
+      document.querySelectorAll('.place-card:not(.age-blocked)').forEach(card=>{
+        card.addEventListener('click',()=>{map.setView([Number(card.dataset.lat),Number(card.dataset.lon)],17)});
       });
     }
     form.addEventListener('submit',async event=>{
@@ -143,10 +170,11 @@ button:hover{background:#4338ca}button:disabled{opacity:.55;cursor:wait}
       try{
         const response=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({address:document.getElementById('address').value,
+            age:parseInt(document.getElementById('age').value,10),
             radius:document.getElementById('radius').value,unit:unit.value,
             travelMode:document.getElementById('travelMode').value})});
         const ct=response.headers.get('content-type')||'';
-        if(!ct.includes('application/json'))throw new Error(`Server error (HTTP ${response.status}): API returned non-JSON. Check deployment config.`);
+        if(!ct.includes('application/json'))throw new Error(`Server error (HTTP ${response.status}): API returned non-JSON.`);
         const data=await response.json();
         if(!response.ok)throw new Error(data.error||`Search failed (HTTP ${response.status}).`);
         statusBox.className='status success';statusBox.textContent=`Searched around ${data.origin.name}`;
@@ -168,6 +196,8 @@ class Place:
     distance_m: float
     category: str
     address: str = ""
+    age_label: str = ""
+    age_blocked: bool = False
 
 
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -216,7 +246,7 @@ def geocode(address):
 
 def build_overpass_query(lat, lon, radius_m):
     filters = [
-        ("amenity", "restaurant|cafe|fast_food|food_court"),
+        ("amenity", "restaurant|cafe|fast_food|food_court|bar|pub"),
         ("amenity", "coworking_space|library"),
         ("office", "coworking"),
     ]
@@ -268,7 +298,19 @@ def format_osm_address(tags):
     return ", ".join(x for x in (street, locality, postcode) if x)
 
 
-def parse_places(elements, origin_lat, origin_lon):
+def apply_age_rules(category: str, user_age: int):
+    """Return (age_label, age_blocked) for a category given user_age."""
+    rule = CATEGORY_AGE_RULES.get(category)
+    if not rule:
+        return "", False
+    min_age, max_age, label = rule
+    if label is None:
+        return "", False
+    blocked = user_age < min_age or (max_age is not None and user_age > max_age)
+    return label, blocked
+
+
+def parse_places(elements, origin_lat, origin_lon, user_age):
     places, seen = [], set()
     for el in elements:
         if not isinstance(el, dict):
@@ -284,6 +326,8 @@ def parse_places(elements, origin_lat, origin_lon):
         office = str(tags.get("office", "")).lower()
         if amenity in {"restaurant", "cafe", "fast_food", "food_court"}:
             category = "Restaurant / café"
+        elif amenity in {"bar", "pub"}:
+            category = "Bar / pub"
         elif amenity == "library":
             category = "Library"
         elif amenity == "coworking_space" or office == "coworking":
@@ -296,10 +340,13 @@ def parse_places(elements, origin_lat, origin_lon):
         if key in seen:
             continue
         seen.add(key)
+        age_label, age_blocked = apply_age_rules(category, user_age)
         places.append(Place(name=name, latitude=lat, longitude=lon,
                             distance_m=round(dist, 1), category=category,
-                            address=format_osm_address(tags)))
-    places.sort(key=lambda p: p.distance_m)
+                            address=format_osm_address(tags),
+                            age_label=age_label, age_blocked=age_blocked))
+    # Sort: available first, then blocked; within each group by distance
+    places.sort(key=lambda p: (p.age_blocked, p.distance_m))
     return places[:MAX_RESULTS]
 
 
@@ -320,15 +367,18 @@ def search_places():
         if not isinstance(payload, dict):
             raise ValueError("Send the request as JSON.")
         address = str(payload.get("address", "")).strip()
+        age = int(payload.get("age", 0))
         radius_value = float(payload.get("radius", 0))
         radius_unit = str(payload.get("unit", "km")).strip().lower()
         travel_mode = str(payload.get("travelMode", "walk")).strip().lower()
         if not address:
             raise ValueError("Enter an address.")
+        if age < 1 or age > 120:
+            raise ValueError("Enter a valid age between 1 and 120.")
         radius_m = radius_to_metres(radius_value, radius_unit, travel_mode)
         lat, lon, display_name = geocode(address)
         elements = query_overpass(build_overpass_query(lat, lon, radius_m))
-        places = parse_places(elements, lat, lon)
+        places = parse_places(elements, lat, lon, age)
         return jsonify({
             "origin": {"latitude": lat, "longitude": lon, "name": display_name},
             "radius_m": round(radius_m),
