@@ -280,6 +280,9 @@ HTML = """<!doctype html>
             <button type="button" id="locBtn" title="Use current location" aria-label="Use current location">📍</button>
           </div>
 
+          <label class="field-label" for="businessName">Business name <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+          <input id="businessName" name="businessName" type="text" placeholder="e.g. Tim Hortons, City Hall…" autocomplete="off">
+
           <div class="row2">
             <div>
               <label class="field-label" for="age">Age <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
@@ -328,7 +331,14 @@ HTML = """<!doctype html>
           <!-- ── Job Filters ─────────────────────────── -->
           <div class="filter-section">
             <label class="field-label">Pay Grade <span style="font-weight:400;color:var(--muted)">(optional, 1–30)</span></label>
-            <input id="payGrade" name="payGrade" type="number" min="1" max="30" placeholder="e.g. 8" inputmode="numeric">
+            <div class="row2">
+              <div>
+                <input id="payGradeMin" name="payGradeMin" type="number" min="1" max="30" placeholder="Min (e.g. 4)" inputmode="numeric">
+              </div>
+              <div>
+                <input id="payGradeMax" name="payGradeMax" type="number" min="1" max="30" placeholder="Max (e.g. 12)" inputmode="numeric">
+              </div>
+            </div>
           </div>
 
           <div class="filter-section">
@@ -533,7 +543,7 @@ HTML = """<!doctype html>
       if(!badge)return;
       try{
         const payload={name:place.name,address};
-        if(filters){if(filters.payGrade)payload.payGrade=filters.payGrade;if(filters.shiftTypes&&filters.shiftTypes.length)payload.shiftTypes=filters.shiftTypes;if(filters.jobTypes&&filters.jobTypes.length)payload.jobTypes=filters.jobTypes;if(filters.jobCategories&&filters.jobCategories.length)payload.jobCategories=filters.jobCategories;}
+        if(filters){if(filters.payGrade)payload.payGrade=filters.payGrade;if(filters.payGradeMin)payload.payGradeMin=filters.payGradeMin;if(filters.payGradeMax)payload.payGradeMax=filters.payGradeMax;if(filters.shiftTypes&&filters.shiftTypes.length)payload.shiftTypes=filters.shiftTypes;if(filters.jobTypes&&filters.jobTypes.length)payload.jobTypes=filters.jobTypes;if(filters.jobCategories&&filters.jobCategories.length)payload.jobCategories=filters.jobCategories;}
         const res=await fetch('/api/hiring',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
         const d=await res.json();
         badge.className='badge';
@@ -596,7 +606,10 @@ HTML = """<!doctype html>
 
     document.getElementById('searchForm').addEventListener('submit',async event=>{
       event.preventDefault();
-      const payGrade=document.getElementById('payGrade').value.trim()||null;
+      const payGrade=document.getElementById('payGrade')?.value.trim()||null;
+      const payGradeMin=document.getElementById('payGradeMin').value.trim()||null;
+      const payGradeMax=document.getElementById('payGradeMax').value.trim()||null;
+      const businessName=document.getElementById('businessName').value.trim()||null;
       const shiftTypes=[...document.querySelectorAll('#shiftTypeFilters input:checked')].map(c=>c.value);
       const jobTypes=[...document.querySelectorAll('#jobTypeFilters input:checked')].map(c=>c.value);
       const jobCategories=[...document.querySelectorAll('#jobCategoryFilters input:checked')].map(c=>c.value);
@@ -610,7 +623,10 @@ HTML = """<!doctype html>
             age:ageVal?parseInt(ageVal,10):null,
             radius:radiusVal?parseFloat(radiusVal):2,unit:unit.value||'km',
             travelMode:document.getElementById('travelMode').value||'walk',
-            payGrade:payGrade?parseInt(payGrade,10):null,
+            payGrade:payGradeMin||payGradeMax?null:null,
+            payGradeMin:payGradeMin?parseInt(payGradeMin,10):null,
+            payGradeMax:payGradeMax?parseInt(payGradeMax,10):null,
+            businessName,
             shiftTypes:shiftTypes.length?shiftTypes:null,
             jobTypes:jobTypes.length?jobTypes:null,
             jobCategories:jobCategories.length?jobCategories:null})});
@@ -820,9 +836,12 @@ def search_places():
         travel_mode = str(payload.get("travelMode", "walk")).strip().lower()
         categories = payload.get("categories")
         pay_grade = payload.get("payGrade")
+        pay_grade_min = payload.get("payGradeMin")
+        pay_grade_max = payload.get("payGradeMax")
         shift_types = payload.get("shiftTypes")
         job_types = payload.get("jobTypes")
         job_categories = payload.get("jobCategories")
+        business_name = str(payload.get("businessName") or "").strip().lower()
         if not isinstance(categories, list) or not categories:
             categories = list(CATEGORY_AGE_RULES.keys())
         if not address:
@@ -833,12 +852,16 @@ def search_places():
         lat, lon, display_name = geocode(address)
         elements = query_overpass(build_overpass_query(lat, lon, radius_m))
         places = parse_places(elements, lat, lon, age, categories)
+        if business_name:
+            places = [p for p in places if business_name in p.name.lower()]
         return jsonify({
             "origin": {"latitude": lat, "longitude": lon, "name": display_name},
             "radius_m": round(radius_m),
             "places": [asdict(p) for p in places],
             "filters": {
                 "payGrade": int(pay_grade) if pay_grade is not None else None,
+                "payGradeMin": int(pay_grade_min) if pay_grade_min is not None else None,
+                "payGradeMax": int(pay_grade_max) if pay_grade_max is not None else None,
                 "shiftTypes": shift_types or [],
                 "jobTypes": job_types or [],
                 "jobCategories": job_categories or [],
@@ -862,7 +885,7 @@ if __name__ == "__main__":
     app.run(debug=True, host="127.0.0.1", port=int(os.environ.get("PORT", "5000")))
 
 
-def groq_search_hiring(name: str, address: str, pay_grade=None, shift_types=None, job_types=None, job_categories=None) -> tuple[bool, str]:
+def groq_search_hiring(name: str, address: str, pay_grade=None, pay_grade_min=None, pay_grade_max=None, shift_types=None, job_types=None, job_categories=None) -> tuple[bool, str]:
     """Use Groq compound-beta with web_search to check if a place is hiring.
     Returns (is_hiring, listing_url)."""
     if not GROQ_API_KEY:
@@ -870,7 +893,10 @@ def groq_search_hiring(name: str, address: str, pay_grade=None, shift_types=None
     try:
         client = Groq(api_key=GROQ_API_KEY)
         filter_hints = []
-        if pay_grade:
+        if pay_grade_min or pay_grade_max:
+            grade_range = f"{pay_grade_min or '?'}–{pay_grade_max or '?'}"
+            filter_hints.append(f"pay grade {grade_range}")
+        elif pay_grade:
             filter_hints.append(f"pay grade {pay_grade}")
         if shift_types:
             filter_hints.append(f"shift: {', '.join(shift_types)}")
@@ -917,6 +943,8 @@ def check_hiring():
         name = str(payload.get("name", "")).strip()
         address = str(payload.get("address", "")).strip()
         pay_grade = payload.get("payGrade")
+        pay_grade_min = payload.get("payGradeMin")
+        pay_grade_max = payload.get("payGradeMax")
         shift_types = payload.get("shiftTypes")
         job_types = payload.get("jobTypes")
         job_categories = payload.get("jobCategories")
@@ -924,7 +952,7 @@ def check_hiring():
             raise ValueError("name is required.")
         if not GROQ_API_KEY:
             return jsonify({"error": "GROQ_API_KEY not configured."}), 503
-        hiring, url = groq_search_hiring(name, address, pay_grade=pay_grade, shift_types=shift_types, job_types=job_types, job_categories=job_categories)
+        hiring, url = groq_search_hiring(name, address, pay_grade=pay_grade, pay_grade_min=pay_grade_min, pay_grade_max=pay_grade_max, shift_types=shift_types, job_types=job_types, job_categories=job_categories)
         return jsonify({"hiring": hiring, "url": url})
     except (ValueError, TypeError) as e:
         return jsonify({"error": str(e)}), 400
