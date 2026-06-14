@@ -295,6 +295,7 @@ HTML = """<!doctype html>
             <div>
               <label class="field-label" for="unit">Unit <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
               <select id="unit" name="unit">
+                <option value="" selected>Not selected</option>
                 <option value="km">Kilometres</option>
                 <option value="m">Metres</option>
                 <option value="minutes">Minutes</option>
@@ -303,6 +304,7 @@ HTML = """<!doctype html>
             <div>
               <label class="field-label" for="travelMode">Travel <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
               <select id="travelMode" name="travelMode">
+                <option value="" selected>Not selected</option>
                 <option value="walk">🚶 Walk</option>
                 <option value="bike">🚲 Cycle</option>
                 <option value="drive">🚗 Drive</option>
@@ -606,8 +608,8 @@ HTML = """<!doctype html>
         const response=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({address:document.getElementById('address').value,
             age:ageVal?parseInt(ageVal,10):null,
-            radius:radiusVal?parseFloat(radiusVal):2,unit:unit.value,
-            travelMode:document.getElementById('travelMode').value,
+            radius:radiusVal?parseFloat(radiusVal):2,unit:unit.value||'km',
+            travelMode:document.getElementById('travelMode').value||'walk',
             payGrade:payGrade?parseInt(payGrade,10):null,
             shiftTypes:shiftTypes.length?shiftTypes:null,
             jobTypes:jobTypes.length?jobTypes:null,
