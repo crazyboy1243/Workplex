@@ -12,11 +12,12 @@ app = Flask(__name__)
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_EMAIL = os.environ.get("NOMINATIM_EMAIL", "").strip()
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-]
+
+# ── Place data providers (priority order: Foursquare → Yelp → HERE) ──────────
+FOURSQUARE_API_KEY = os.environ.get("FOURSQUARE_API_KEY", "").strip()
+YELP_API_KEY       = os.environ.get("YELP_API_KEY", "").strip()
+HERE_API_KEY       = os.environ.get("HERE_API_KEY", "").strip()
+
 USER_AGENT = os.environ.get(
     "RADIUS_MAP_USER_AGENT",
     "RadiusMapStudentProject/2.0 (contact: 787005@pdsb.net)",
@@ -291,6 +292,7 @@ HTML = """<!doctype html>
             <div>
               <label class="field-label" for="radius">Radius <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
               <input id="radius" name="radius" type="number" min="0.1" step="0.1" value="2" inputmode="decimal">
+              <p id="radiusLockedNote" style="display:none;font-size:.72rem;color:var(--indigo);margin-top:3px">📍 Using full area — radius locked</p>
             </div>
           </div>
 
@@ -327,6 +329,16 @@ HTML = """<!doctype html>
             <input type="checkbox" id="hiringOnly">
             <span class="toggle-pill"></span>
           </label>
+
+          <div class="filter-section">
+            <label class="field-label">Data source <span style="font-weight:400;color:var(--muted)">(auto-fallback if unavailable)</span></label>
+            <div class="chips" id="providerFilters" style="grid-template-columns:1fr 1fr 1fr">
+              <label class="chip-label"><input type="radio" name="provider" value="" checked>🔄 Auto</label>
+              <label class="chip-label"><input type="radio" name="provider" value="foursquare">📍 Foursquare</label>
+              <label class="chip-label"><input type="radio" name="provider" value="yelp">⭐ Yelp</label>
+              <label class="chip-label" style="grid-column:span 3;justify-content:center"><input type="radio" name="provider" value="here">🗺️ HERE</label>
+            </div>
+          </div>
 
           <!-- ── Job Filters ─────────────────────────── -->
           <div class="filter-section">
@@ -443,6 +455,8 @@ HTML = """<!doctype html>
           const d=await r.json();
           addrInput.value=d.display_name||`${lat},${lon}`;
         }catch{addrInput.value=`${lat.toFixed(6)},${lon.toFixed(6)}`;}
+        selectedLocType=null;addrInput.dataset.osmType='';addrInput.dataset.boundingbox='';
+        setRadiusLocked(false);
         locBtn.disabled=false;locBtn.classList.remove('locating');locBtn.textContent='📍';
       },err=>{
         locBtn.disabled=false;locBtn.classList.remove('locating');locBtn.textContent='📍';
@@ -486,9 +500,32 @@ HTML = """<!doctype html>
       });
     }
 
+    // Broad OSM types where radius doesn't make sense
+    const BROAD_TYPES=new Set(['country','state','province','region','county','city','town','village','hamlet','suburb','neighbourhood','quarter','municipality','district']);
+    let selectedLocType=null; // null = unknown/address, string = OSM type
+
+    function setRadiusLocked(locked){
+      const rInput=document.getElementById('radius');
+      const rUnit=document.getElementById('unit');
+      const rNote=document.getElementById('radiusLockedNote');
+      rInput.disabled=locked;
+      rUnit.disabled=locked;
+      rInput.style.opacity=locked?'.4':'1';
+      rUnit.style.opacity=locked?'.4':'1';
+      if(rNote)rNote.style.display=locked?'':'none';
+    }
+
     function selectSugg(i){
       if(i<0||i>=suggData.length)return;
-      addrInput.value=suggData[i].display_name;
+      const s=suggData[i];
+      addrInput.value=s.display_name;
+      // Store OSM type info for later use in the search payload
+      const osmType=s.type||s.class||'';
+      selectedLocType=osmType;
+      addrInput.dataset.osmType=osmType;
+      addrInput.dataset.boundingbox=JSON.stringify(s.boundingbox||null);
+      const isBroad=BROAD_TYPES.has(osmType);
+      setRadiusLocked(isBroad);
       suggBox.style.display='none';addrInput.setAttribute('aria-expanded','false');
       suggData=[];activeIdx=-1;
     }
@@ -497,7 +534,7 @@ HTML = """<!doctype html>
       if(q.length<2){suggData=[];showSugg();return;}
       try{
         // Accept all OSM feature classes; featuretype param broadens results
-        const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&limit=7&addressdetails=0&dedupe=1`;
+        const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&limit=7&addressdetails=0&dedupe=1&bounded=0`;
         const r=await fetch(url,{headers:{'Accept-Language':'en','User-Agent':'WorkplexHiringApp/1.0'}});
         suggData=await r.json();
         activeIdx=-1;showSugg();
@@ -506,6 +543,11 @@ HTML = """<!doctype html>
 
     addrInput.addEventListener('input',()=>{
       clearTimeout(debTimer);
+      // If user is typing manually (no autocomplete selected), unlock radius
+      selectedLocType=null;
+      addrInput.dataset.osmType='';
+      addrInput.dataset.boundingbox='';
+      setRadiusLocked(false);
       debTimer=setTimeout(()=>fetchSugg(addrInput.value.trim()),280);
     });
 
@@ -556,20 +598,30 @@ HTML = """<!doctype html>
     function renderResults(data){
       resultLayer.clearLayers();
       if(radiusCircle)map.removeLayer(radiusCircle);
+      radiusCircle=null;
       const origin=[data.origin.latitude,data.origin.longitude];
       L.marker(origin).addTo(resultLayer).bindPopup(`<strong>Start</strong><br>${esc(data.origin.name)}`);
-      radiusCircle=L.circle(origin,{radius:data.radius_m,weight:2,fillOpacity:.07,color:'#4f46e5'}).addTo(map);
+      if(!data.use_full_area){
+        radiusCircle=L.circle(origin,{radius:data.radius_m,weight:2,fillOpacity:.07,color:'#4f46e5'}).addTo(map);
+      }
       data.places.forEach((place,i)=>{
         L.marker([place.latitude,place.longitude],{icon:markerIcon(place.category,place.age_blocked)})
           .addTo(resultLayer).bindPopup(`<strong>${esc(place.name)}</strong><br>${esc(place.category)}<br>${fmtDist(place.distance_m)}`)
           .on('click',()=>document.getElementById(`place-${i}`)?.scrollIntoView({behavior:'smooth',block:'center'}));
       });
-      map.fitBounds(radiusCircle.getBounds(),{padding:[25,25]});
+      if(radiusCircle){
+        map.fitBounds(radiusCircle.getBounds(),{padding:[25,25]});
+      } else {
+        const allLatLngs=[[data.origin.latitude,data.origin.longitude],...data.places.map(p=>[p.latitude,p.longitude])];
+        if(allLatLngs.length>1)map.fitBounds(L.latLngBounds(allLatLngs),{padding:[40,40]});
+        else map.setView(origin,13);
+      }
       if(!data.places.length){resultsBox.innerHTML='<p style="color:var(--muted);font-size:.87rem;padding:8px 0">No places found in this radius.</p>';return;}
       const checkHiring=document.getElementById('hiringOnly').checked;
       const showing=data.places.filter(p=>!p.age_blocked).length;
       const blocked=data.places.length-showing;
-      resultsBox.innerHTML=`<div class="results-heading"><strong>${showing} available</strong><span>${blocked>0?blocked+' age-restricted · ':''}Closest first</span></div>`+
+      const providerLabel={'foursquare':'📍 Foursquare','yelp':'⭐ Yelp','here':'🗺️ HERE'}[data.provider]||'🔄 Auto';
+      resultsBox.innerHTML=`<div class="results-heading"><strong>${showing} available</strong><span>${blocked>0?blocked+' age-restricted · ':''}${providerLabel} · Closest first</span></div>`+
         data.places.map((place,i)=>{
           const q=encodeURIComponent(place.name);
           const loc=encodeURIComponent(place.address||data.origin.name.split(',').slice(0,2).join(','));
@@ -615,11 +667,14 @@ HTML = """<!doctype html>
       const jobCategories=[...document.querySelectorAll('#jobCategoryFilters input:checked')].map(c=>c.value);
       const ageVal=document.getElementById('age').value.trim();
       const radiusVal=document.getElementById('radius').value.trim();
+      const provider=document.querySelector('input[name="provider"]:checked')?.value||'';
       statusBox.className='status loading';statusBox.textContent='Searching map data\u2026';
       resultsBox.innerHTML='';button.disabled=true;
       try{
         const response=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({address:document.getElementById('address').value,
+            useFullArea:BROAD_TYPES.has(addrInput.dataset.osmType||''),
+            boundingbox:(()=>{try{return JSON.parse(addrInput.dataset.boundingbox||'null');}catch{return null;}})(),
             age:ageVal?parseInt(ageVal,10):null,
             radius:radiusVal?parseFloat(radiusVal):2,unit:unit.value||'km',
             travelMode:document.getElementById('travelMode').value||'walk',
@@ -629,12 +684,13 @@ HTML = """<!doctype html>
             businessName,
             shiftTypes:shiftTypes.length?shiftTypes:null,
             jobTypes:jobTypes.length?jobTypes:null,
-            jobCategories:jobCategories.length?jobCategories:null})});
+            jobCategories:jobCategories.length?jobCategories:null,
+            provider:provider||null})});
         const ct=response.headers.get('content-type')||'';
         if(!ct.includes('application/json'))throw new Error(`Server error (HTTP ${response.status})`);
         const data=await response.json();
         if(!response.ok)throw new Error(data.error||`Search failed (HTTP ${response.status})`);
-        statusBox.className='status success';statusBox.textContent=`Found near ${data.origin.name}`;
+        statusBox.className='status success';statusBox.textContent=data.use_full_area?`Covering all of ${data.origin.name.split(',')[0]}`:`Found near ${data.origin.name}`;
         renderResults(data);
         if(isMobile())expandPanel();
       }catch(error){statusBox.className='status error';statusBox.textContent=error.message;}
@@ -705,109 +761,178 @@ def geocode(address):
 
 
 def build_overpass_query(lat, lon, radius_m):
-    filters = [
-        ("amenity", "restaurant|cafe|fast_food|food_court|bar|pub"),
-        ("amenity", "coworking_space|library"),
-        ("office", "coworking"),
-    ]
-    stmts = []
-    for key, values in filters:
-        for t in ("node", "way", "relation"):
-            stmts.append(f'{t}["{key}"~"^({values})$"](around:{int(radius_m)},{lat},{lon});')
-    return "[out:json][timeout:12];(" + "".join(stmts) + ");out center tags;"
+    # Kept as dead-code stub so nothing else breaks
+    return ""
+
+
+# ── Shared Place normaliser ───────────────────────────────────────────────────
+def _make_place(name, lat, lon, address, category, origin_lat, origin_lon, user_age):
+    dist = haversine_m(origin_lat, origin_lon, lat, lon)
+    age_label, age_blocked = apply_age_rules(category, user_age)
+    return Place(name=name, latitude=lat, longitude=lon,
+                 distance_m=round(dist, 1), category=category,
+                 address=address, age_label=age_label, age_blocked=age_blocked)
+
+
+# ── Foursquare Places API ─────────────────────────────────────────────────────
+def fetch_foursquare(lat, lon, radius_m, business_name=None):
+    """Returns list of raw dicts with keys: name, lat, lon, address, category"""
+    if not FOURSQUARE_API_KEY:
+        raise RuntimeError("FOURSQUARE_API_KEY not set")
+    params = {
+        "ll": f"{lat},{lon}",
+        "radius": int(min(radius_m, 50_000)),
+        "limit": 50,
+        "fields": "name,geocodes,location,categories",
+    }
+    if business_name:
+        params["query"] = business_name
+    r = requests.get(
+        "https://api.foursquare.com/v3/places/search",
+        params=params,
+        headers={"Authorization": FOURSQUARE_API_KEY, "Accept": "application/json"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    results = []
+    for p in r.json().get("results", []):
+        geo = p.get("geocodes", {}).get("main", {})
+        plat, plon = geo.get("latitude"), geo.get("longitude")
+        if plat is None or plon is None:
+            continue
+        loc = p.get("location", {})
+        parts = [loc.get("address", ""), loc.get("locality", ""), loc.get("postcode", "")]
+        address = ", ".join(x for x in parts if x)
+        cats = [c.get("name", "") for c in p.get("categories", [])]
+        results.append({"name": p.get("name", "Unknown"), "lat": float(plat), "lon": float(plon),
+                        "address": address, "category": cats[0] if cats else "Business"})
+    return results
+
+
+# ── Yelp Fusion API ───────────────────────────────────────────────────────────
+def fetch_yelp(lat, lon, radius_m, business_name=None):
+    if not YELP_API_KEY:
+        raise RuntimeError("YELP_API_KEY not set")
+    params = {
+        "latitude": lat, "longitude": lon,
+        "radius": int(min(radius_m, 40_000)),
+        "limit": 50,
+        "sort_by": "distance",
+    }
+    if business_name:
+        params["term"] = business_name
+    r = requests.get(
+        "https://api.yelp.com/v3/businesses/search",
+        params=params,
+        headers={"Authorization": f"Bearer {YELP_API_KEY}", "Accept": "application/json"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    results = []
+    for b in r.json().get("businesses", []):
+        coords = b.get("coordinates", {})
+        plat, plon = coords.get("latitude"), coords.get("longitude")
+        if plat is None or plon is None:
+            continue
+        loc = b.get("location", {})
+        parts = [loc.get("address1", ""), loc.get("city", ""), loc.get("zip_code", "")]
+        address = ", ".join(x for x in parts if x)
+        cats = [c.get("title", "") for c in b.get("categories", [])]
+        results.append({"name": b.get("name", "Unknown"), "lat": float(plat), "lon": float(plon),
+                        "address": address, "category": cats[0] if cats else "Business"})
+    return results
+
+
+# ── HERE Places API ───────────────────────────────────────────────────────────
+def fetch_here(lat, lon, radius_m, business_name=None):
+    if not HERE_API_KEY:
+        raise RuntimeError("HERE_API_KEY not set")
+    params = {
+        "at": f"{lat},{lon}",
+        "limit": 50,
+        "apiKey": HERE_API_KEY,
+    }
+    if business_name:
+        params["q"] = business_name
+        endpoint = "https://discover.search.hereapi.com/v1/discover"
+        params["in"] = f"circle:{lat},{lon};r={int(radius_m)}"
+    else:
+        endpoint = "https://browse.search.hereapi.com/v1/browse"
+        params["circle.radius"] = int(radius_m)
+    r = requests.get(endpoint, params=params, timeout=15)
+    r.raise_for_status()
+    results = []
+    for item in r.json().get("items", []):
+        pos = item.get("position", {})
+        plat, plon = pos.get("lat"), pos.get("lng")
+        if plat is None or plon is None:
+            continue
+        addr = item.get("address", {})
+        parts = [addr.get("label", "")]
+        address = parts[0] if parts[0] else ""
+        cats = [c.get("name", "") for c in item.get("categories", [])]
+        results.append({"name": item.get("title", "Unknown"), "lat": float(plat), "lon": float(plon),
+                        "address": address, "category": cats[0] if cats else "Business"})
+    return results
+
+
+# ── Provider fallback chain ───────────────────────────────────────────────────
+PROVIDERS = [
+    ("foursquare", fetch_foursquare),
+    ("yelp",       fetch_yelp),
+    ("here",       fetch_here),
+]
+
+def query_places(lat, lon, radius_m, business_name=None, preferred=None):
+    """Try providers in order; auto-fallback on error. Returns (results, provider_used)."""
+    ordered = PROVIDERS[:]
+    if preferred:
+        ordered = [(n, f) for n, f in PROVIDERS if n == preferred] + \
+                  [(n, f) for n, f in PROVIDERS if n != preferred]
+    errors = []
+    for name, fn in ordered:
+        try:
+            results = fn(lat, lon, radius_m, business_name=business_name)
+            return results, name
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    raise RuntimeError("All place providers failed. " + " | ".join(errors))
 
 
 def query_overpass(query):
-    errors = []
-    for endpoint in OVERPASS_URLS:
-        try:
-            r = requests.post(endpoint, data={"data": query},
-                              headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-            elements = data.get("elements", [])
-            if not isinstance(elements, list):
-                raise RuntimeError("Map service returned invalid data.")
-            return elements
-        except (requests.RequestException, ValueError, RuntimeError) as e:
-            errors.append(f"{endpoint}: {e}")
-    raise RuntimeError("Map data service unavailable. " + " | ".join(errors))
+    # Stub — no longer used
+    return []
 
 
 def element_coordinates(el):
-    if "lat" in el and "lon" in el:
-        try:
-            return float(el["lat"]), float(el["lon"])
-        except (TypeError, ValueError):
-            return None
-    c = el.get("center")
-    if isinstance(c, dict) and "lat" in c and "lon" in c:
-        try:
-            return float(c["lat"]), float(c["lon"])
-        except (TypeError, ValueError):
-            return None
     return None
 
 
 def format_osm_address(tags):
-    street = " ".join(x for x in (
-        str(tags.get("addr:housenumber", "")).strip(),
-        str(tags.get("addr:street", "")).strip()) if x)
-    locality = str(tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village") or "").strip()
-    postcode = str(tags.get("addr:postcode", "")).strip()
-    return ", ".join(x for x in (street, locality, postcode) if x)
-
-
-def apply_age_rules(category: str, user_age: int):
-    """Return (age_label, age_blocked) for a category given user_age."""
-    rule = CATEGORY_AGE_RULES.get(category)
-    if not rule:
-        return "", False
-    min_age, max_age, label = rule
-    if label is None:
-        return "", False
-    blocked = user_age < min_age or (max_age is not None and user_age > max_age)
-    return label, blocked
+    return ""
 
 
 def parse_places(elements, origin_lat, origin_lon, user_age, categories):
+    # Stub — replaced by parse_provider_places
+    return []
+
+
+def parse_provider_places(raw, origin_lat, origin_lon, user_age, business_name=None):
     places, seen = [], set()
-    for el in elements:
-        if not isinstance(el, dict):
+    for r in raw:
+        name = str(r.get("name") or "Unknown").strip()
+        if business_name and business_name.lower() not in name.lower():
             continue
-        coords = element_coordinates(el)
-        if coords is None:
+        lat, lon = r.get("lat"), r.get("lon")
+        if lat is None or lon is None:
             continue
-        lat, lon = coords
-        tags = el.get("tags", {})
-        if not isinstance(tags, dict):
-            tags = {}
-        amenity = str(tags.get("amenity", "")).lower()
-        office = str(tags.get("office", "")).lower()
-        if amenity in {"restaurant", "cafe", "fast_food", "food_court"}:
-            category = "Restaurant / café"
-        elif amenity in {"bar", "pub"}:
-            category = "Bar / pub"
-        elif amenity == "library":
-            category = "Library"
-        elif amenity == "coworking_space" or office == "coworking":
-            category = "Coworking space"
-        else:
-            continue
-        if category not in categories:
-            continue
-        name = str(tags.get("name") or tags.get("brand") or f"Unnamed {category.lower()}").strip()
-        dist = haversine_m(origin_lat, origin_lon, lat, lon)
-        key = (name.casefold(), round(lat * 100_000), round(lon * 100_000))
+        address = str(r.get("address") or "")
+        category = str(r.get("category") or "Business")
+        key = (name.casefold(), round(lat * 1000), round(lon * 1000))
         if key in seen:
             continue
         seen.add(key)
-        age_label, age_blocked = apply_age_rules(category, user_age)
-        places.append(Place(name=name, latitude=lat, longitude=lon,
-                            distance_m=round(dist, 1), category=category,
-                            address=format_osm_address(tags),
-                            age_label=age_label, age_blocked=age_blocked))
-    # Sort: available first, then blocked; within each group by distance
+        places.append(_make_place(name, lat, lon, address, category, origin_lat, origin_lon, user_age))
     places.sort(key=lambda p: (p.age_blocked, p.distance_m))
     return places[:MAX_RESULTS]
 
@@ -844,20 +969,37 @@ def search_places():
         business_name = str(payload.get("businessName") or "").strip().lower()
         if not isinstance(categories, list) or not categories:
             categories = list(CATEGORY_AGE_RULES.keys())
+        use_full_area = bool(payload.get("useFullArea"))
+        boundingbox = payload.get("boundingbox")  # [lat_min, lat_max, lon_min, lon_max] from Nominatim
         if not address:
             raise ValueError("Enter an address.")
         if age_raw is not None and (age < 1 or age > 120):
             raise ValueError("Age must be between 1 and 120.")
-        radius_m = radius_to_metres(radius_value, radius_unit, travel_mode)
         lat, lon, display_name = geocode(address)
-        elements = query_overpass(build_overpass_query(lat, lon, radius_m))
-        places = parse_places(elements, lat, lon, age, categories)
+        if use_full_area and boundingbox and len(boundingbox) == 4:
+            # Derive radius from the diagonal of the bounding box
+            try:
+                bb_lat_min, bb_lat_max = float(boundingbox[0]), float(boundingbox[1])
+                bb_lon_min, bb_lon_max = float(boundingbox[2]), float(boundingbox[3])
+                corner_dist = haversine_m(bb_lat_min, bb_lon_min, bb_lat_max, bb_lon_max)
+                radius_m = corner_dist / 2
+            except (TypeError, ValueError, IndexError):
+                radius_m = radius_to_metres(radius_value, radius_unit, travel_mode)
+        else:
+            radius_m = radius_to_metres(radius_value, radius_unit, travel_mode)
+        preferred_provider = str(payload.get("provider") or "").strip().lower() or None
+        raw_places, provider_used = query_places(lat, lon, radius_m,
+                                                  business_name=business_name or None,
+                                                  preferred=preferred_provider)
+        places = parse_provider_places(raw_places, lat, lon, age, business_name=business_name or None)
         if business_name:
-            places = [p for p in places if business_name in p.name.lower()]
+            places = [p for p in places if business_name.lower() in p.name.lower()]
         return jsonify({
             "origin": {"latitude": lat, "longitude": lon, "name": display_name},
             "radius_m": round(radius_m),
+            "use_full_area": use_full_area,
             "places": [asdict(p) for p in places],
+            "provider": provider_used,
             "filters": {
                 "payGrade": int(pay_grade) if pay_grade is not None else None,
                 "payGradeMin": int(pay_grade_min) if pay_grade_min is not None else None,
